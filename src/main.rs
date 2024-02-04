@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, mem};
 use axum::{
     routing::{get, post},
     Router,
@@ -114,6 +114,7 @@ async fn connect(State(state): State<AppState>, value: String) -> (StatusCode, S
             let id: u64 = body.id.parse().unwrap();
             let addr: SocketAddr = body.addr.parse().unwrap();
             nodes.push(Node { id, addr });
+            std::mem::drop(nodes);
 
             println!("[/connect] sync new node: {} - ID: {}", addr, id);
 
@@ -148,6 +149,7 @@ async fn ping(
     }
 
     nodes.push(Node { id: node_id, addr: body.addr.parse().unwrap() });
+    std::mem::drop(nodes);
 
     println!("[/ping] updated state: {:?}", state);
 
@@ -208,7 +210,7 @@ async fn handle_prepare(State(state): State<AppState>, proposal_id: String) -> (
     let proposal_id: u64 = proposal_id.parse().unwrap();
     let mut acceptor = state.acceptor.lock().await;
 
-    if proposal_id < acceptor.last_ballot_number {
+    if proposal_id <= acceptor.last_ballot_number {
         let payload = HandleProposalPayload {
             error: Some(String::from("The proposal ID is lesser than the last accepted ballot number")),
             value: None,
@@ -216,11 +218,7 @@ async fn handle_prepare(State(state): State<AppState>, proposal_id: String) -> (
         return (StatusCode::BAD_REQUEST, Json(payload));
     }
 
-    acceptor.last_ballot_number = proposal_id;
-
-    println!("[/handle-prepare] setting the new last ballot number as: {}", proposal_id);
-
-    if acceptor.accepted_proposal.is_some() {
+    if acceptor.accepted_proposal.is_some() && acceptor.last_ballot_number == proposal_id {
         println!("[/handle-prepare] Node {} already has a value: {:?}", state.node.id, acceptor.accepted_proposal);
         let value = acceptor.accepted_proposal.clone();
         let payload = HandleProposalPayload {
@@ -229,6 +227,11 @@ async fn handle_prepare(State(state): State<AppState>, proposal_id: String) -> (
         };
         return (StatusCode::OK, Json(payload));
     }
+
+
+    acceptor.last_ballot_number = proposal_id;
+
+    println!("[/handle-prepare] setting the new last ballot number as: {}", proposal_id);
 
     println!("[/handle-prepare] Node {} accepted a new proposal: {}", state.node.id, proposal_id);
 
@@ -281,6 +284,8 @@ async fn handle_learn(State(state): State<AppState>, payload: Json<Ballot>) -> (
     };
 
     println!("[/handle-learn] Node {} learns a new value: {:?}", state.node.id, payload.value);
+
+    reset_decision_point(&state).await;
 
     (StatusCode::OK, ())
 }
@@ -386,4 +391,15 @@ impl Proposer {
 
         Ok(())
     }
+}
+
+async fn reset_decision_point(state: &AppState) {
+    let mut acceptor = state.acceptor.lock().await;
+    acceptor.last_ballot_number = 0;
+    acceptor.accepted_proposal = None;
+
+    let mut proposer = state.proposer.lock().await;
+    proposer.id = 0;
+
+    println!("[reset_decision_point] Decision point reseted!");
 }
